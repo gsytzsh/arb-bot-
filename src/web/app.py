@@ -26,15 +26,18 @@ class GridCreateRequest(BaseModel):
     upper_price: float  # 价格上限
     grid_num: int  # 网格数量
     investment_amount: float  # 投资金额 (USDT)
+    grid_type: str = "uniform"  # "uniform"(等间距) 或 "cauchy"(柯西分布)
     stop_loss_price: Optional[float] = None  # 止损价
     take_profit_price: Optional[float] = None  # 止盈价
 
 
 class GridPreviewRequest(BaseModel):
     """网格预览请求"""
+    inst_id: str  # 交易对（柯西网格需要）
     lower_price: float
     upper_price: float
     grid_num: int
+    grid_type: str = "uniform"  # "uniform" 或 "cauchy"
 
 
 class TradingBot:
@@ -197,9 +200,11 @@ async def preview_grid(req: GridPreviewRequest):
         raise HTTPException(status_code=500, detail="Not initialized")
 
     levels = b.grid_manager.calculate_preview(
-        Decimal(str(req.lower_price)),
-        Decimal(str(req.upper_price)),
-        req.grid_num
+        inst_id=req.inst_id,
+        lower_price=Decimal(str(req.lower_price)),
+        upper_price=Decimal(str(req.upper_price)),
+        grid_num=req.grid_num,
+        grid_type=req.grid_type
     )
     return {"levels": levels}
 
@@ -254,6 +259,7 @@ async def create_grid(req: GridCreateRequest):
         upper_price=Decimal(str(req.upper_price)),
         grid_num=req.grid_num,
         investment_amount=Decimal(str(req.investment_amount)),
+        grid_type=req.grid_type,
         stop_loss_price=Decimal(str(req.stop_loss_price)) if req.stop_loss_price else None,
         take_profit_price=Decimal(str(req.take_profit_price)) if req.take_profit_price else None
     )

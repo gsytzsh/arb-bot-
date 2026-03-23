@@ -38,15 +38,30 @@ class GridTradeManager:
         grid_num: int,
         investment_amount: Decimal,
         stop_loss_price: Optional[Decimal] = None,
-        take_profit_price: Optional[Decimal] = None
+        take_profit_price: Optional[Decimal] = None,
+        grid_type: str = "uniform"  # "uniform" 或 "cauchy"
     ) -> Dict:
-        """创建网格"""
+        """
+        创建网格
+
+        Args:
+            grid_type: 网格类型 - "uniform"(等间距) 或 "cauchy"(柯西分布)
+                       柯西分布网格在当前价附近布置更密集，适合震荡行情
+        """
+        # 获取当前价格（柯西网格需要）
+        ticker = self.client.get_ticker(inst_id)
+        current_price = None
+        if ticker:
+            current_price = Decimal(ticker.get('last', '0'))
+
         config = GridConfig(
             inst_id=inst_id,
             lower_price=lower_price,
             upper_price=upper_price,
             grid_num=grid_num,
             investment_amount=investment_amount,
+            grid_type=grid_type,
+            current_price=current_price,
             stop_loss_price=stop_loss_price,
             take_profit_price=take_profit_price
         )
@@ -69,13 +84,13 @@ class GridTradeManager:
             return {"success": False, "message": f"最小投资金额需 {float(min_investment):.0f} USDT (每格≥5 USDT)"}
 
         # 检查当前价格是否在区间内
-        ticker = self.client.get_ticker(inst_id)
-        if ticker:
-            current_price = Decimal(ticker.get('last', '0'))
+        if current_price and current_price > 0:
             if current_price <= lower_price:
                 return {"success": False, "message": f"当前价格 ({current_price}) 低于网格下限，可能立即满仓"}
             if current_price >= upper_price:
                 return {"success": False, "message": f"当前价格 ({current_price}) 高于网格上限，可能立即空仓"}
+        else:
+            return {"success": False, "message": "无法获取当前价格"}
 
         balance = self._check_usdt_balance()
         if balance < investment_amount * Decimal('1.1'):
@@ -374,12 +389,30 @@ class GridTradeManager:
 
     def calculate_preview(
         self,
+        inst_id: str,
         lower_price: Decimal,
         upper_price: Decimal,
-        grid_num: int
+        grid_num: int,
+        grid_type: str = "uniform"  # "uniform" 或 "cauchy"
     ) -> List[Dict]:
-        """预览网格价格"""
-        return self.strategy.calculate_grid_levels(lower_price, upper_price, grid_num)
+        """
+        预览网格价格
+
+        Args:
+            grid_type: 网格类型 - "uniform"(等间距) 或 "cauchy"(柯西分布)
+        """
+        # 柯西网格需要当前价格
+        current_price = None
+        if grid_type == "cauchy":
+            ticker = self.client.get_ticker(inst_id)
+            if ticker:
+                current_price = Decimal(ticker.get('last', '0'))
+
+        return self.strategy.calculate_grid_levels(
+            lower_price, upper_price, grid_num,
+            current_price=current_price,
+            grid_type=grid_type
+        )
 
     async def monitor_and_trade(self):
         """监控网格并执行交易"""

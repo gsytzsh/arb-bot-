@@ -111,6 +111,8 @@ class GridConfig:
     upper_price: Decimal  # 价格上限
     grid_num: int  # 网格数量
     investment_amount: Decimal  # 投资金额 (USDT)
+    grid_type: str = "uniform"  # "uniform" (等间距) 或 "cauchy" (柯西分布)
+    current_price: Optional[Decimal] = None  # 当前价格（柯西网格需要）
     stop_loss_price: Optional[Decimal] = None  # 止损价
     take_profit_price: Optional[Decimal] = None  # 止盈价
 
@@ -121,6 +123,8 @@ class GridConfig:
             'upper_price': decimal_to_float(self.upper_price),
             'grid_num': self.grid_num,
             'investment_amount': decimal_to_float(self.investment_amount),
+            'grid_type': self.grid_type,
+            'current_price': decimal_to_float(self.current_price) if self.current_price else None,
             'stop_loss_price': decimal_to_float(self.stop_loss_price) if self.stop_loss_price else None,
             'take_profit_price': decimal_to_float(self.take_profit_price) if self.take_profit_price else None
         }
@@ -133,6 +137,8 @@ class GridConfig:
             upper_price=float_to_decimal(data['upper_price']),
             grid_num=data['grid_num'],
             investment_amount=float_to_decimal(data['investment_amount']),
+            grid_type=data.get('grid_type', 'uniform'),
+            current_price=float_to_decimal(data['current_price']) if data.get('current_price') else None,
             stop_loss_price=float_to_decimal(data['stop_loss_price']) if data.get('stop_loss_price') else None,
             take_profit_price=float_to_decimal(data['take_profit_price']) if data.get('take_profit_price') else None
         )
@@ -349,13 +355,23 @@ class GridStrategy:
         - 启动时，在当前价下方的网格挂买单
         - 买单成交后，在更高一格挂卖单（卖出价 = 下一格价格）
         - 卖单成交后，重新在原买单价挂买单
+
+        网格类型：
+        - uniform: 等间距网格（传统方式）
+        - cauchy: 柯西分布网格（在当前价附近更密集）
         """
         self.grid_counter += 1
         grid_id = f"grid_{self.grid_counter}_{datetime.now().strftime('%H%M%S')}"
 
-        # 计算网格价格
-        price_range = config.upper_price - config.lower_price
-        grid_step = price_range / config.grid_num
+        # 计算网格价格（支持柯西分布）
+        if config.grid_type == "cauchy" and config.current_price:
+            prices = self._calculate_cauchy_prices(
+                config.lower_price, config.upper_price, config.grid_num, config.current_price
+            )
+        else:
+            prices = self._calculate_uniform_prices(
+                config.lower_price, config.upper_price, config.grid_num
+            )
 
         # 计算每格订单大小
         # 按等 USDT 分配，避免高价层超预算
@@ -370,7 +386,7 @@ class GridStrategy:
         levels = []
         total_cost_estimate = Decimal('0')
         for i in range(config.grid_num):
-            price = config.lower_price + (grid_step * i)
+            price = prices[i]
             size_at_level = (per_level_usdt / price).quantize(Decimal('0.00000001'))
             total_cost_estimate += size_at_level * price
 
@@ -399,7 +415,7 @@ class GridStrategy:
 
         self.grids[grid_id] = grid
         logger.info(f"创建网格：{grid_id}, 交易对={config.inst_id}, "
-                   f"区间={config.lower_price}-{config.upper_price}, 格数={config.grid_num}")
+                   f"区间={config.lower_price}-{config.upper_price}, 格数={config.grid_num}, 类型={config.grid_type}")
         self.save_grids()  # 持久化
 
         return grid
@@ -439,23 +455,105 @@ class GridStrategy:
         self,
         lower_price: Decimal,
         upper_price: Decimal,
-        grid_num: int
+        grid_num: int,
+        current_price: Optional[Decimal] = None,
+        grid_type: str = "uniform"  # "uniform" 或 "cauchy"
     ) -> List[Dict]:
-        """计算网格价格（用于预览）"""
-        price_range = upper_price - lower_price
-        grid_step = price_range / grid_num
+        """
+        计算网格价格（用于预览）
+
+        Args:
+            lower_price: 价格下限
+            upper_price: 价格上限
+            grid_num: 网格数量
+            current_price: 当前价格（柯西网格需要）
+            grid_type: 网格类型 - "uniform"(等间距) 或 "cauchy"(柯西分布)
+        """
+        if grid_type == "cauchy" and current_price:
+            prices = self._calculate_cauchy_prices(
+                lower_price, upper_price, grid_num, current_price
+            )
+        else:
+            # 均匀网格（原有逻辑）
+            prices = self._calculate_uniform_prices(lower_price, upper_price, grid_num)
 
         levels = []
-        for i in range(grid_num + 1):
-            price = lower_price + (grid_step * i)
-            # 预览时只显示价格，实际买卖类型取决于当前价格
+        for i, price in enumerate(prices):
             levels.append({
                 'level': i + 1,
-                'price': float(price.quantize(Decimal('0.01'))),
+                'price': float(price),
                 'type': 'buy' if i < grid_num else 'sell'
             })
 
         return levels
+
+    def _calculate_uniform_prices(
+        self,
+        lower_price: Decimal,
+        upper_price: Decimal,
+        grid_num: int
+    ) -> List[Decimal]:
+        """均匀网格价格计算"""
+        price_range = upper_price - lower_price
+        grid_step = price_range / grid_num
+        return [lower_price + (grid_step * i) for i in range(grid_num)]
+
+    def _calculate_cauchy_prices(
+        self,
+        lower_price: Decimal,
+        upper_price: Decimal,
+        grid_num: int,
+        current_price: Decimal
+    ) -> List[Decimal]:
+        """
+        柯西分布网格价格计算
+
+        原理：
+        - 在当前价格附近布置更密集的网格（高成交概率区）
+        - 在区间边缘布置较稀疏网格（低概率区）
+        - 柯西分布的重尾特性更好捕捉极端波动
+
+        柯西分布概率密度：f(x) = 1 / [πγ(1 + ((x-x₀)/γ)²)]
+        其中 x₀ 为中心价格，γ 为尺度参数
+        """
+        prices = []
+        lower_f = float(lower_price)
+        upper_f = float(upper_price)
+        mid_price = float(current_price)
+
+        # 确保当前价格在区间内
+        if mid_price < lower_f:
+            mid_price = lower_f + (upper_f - lower_f) * 0.3
+        elif mid_price > upper_f:
+            mid_price = lower_f + (upper_f - lower_f) * 0.7
+
+        # 柯西分布尺度参数 γ
+        # 设为区间宽度的 25-35%，根据当前价格位置调整
+        price_range = upper_f - lower_f
+        gamma = price_range * 0.30
+
+        # 柯西累积分布函数的近似逆函数
+        # CDF(x) = 0.5 + (1/π) * arctan((x - x₀) / γ)
+        # 逆 CDF(p) = x₀ + γ * tan(π * (p - 0.5))
+
+        import math
+
+        # 计算区间两端对应的累积概率
+        cdf_lower = 0.5 + (1 / math.pi) * math.atan((lower_f - mid_price) / gamma)
+        cdf_upper = 0.5 + (1 / math.pi) * math.atan((upper_f - mid_price) / gamma)
+
+        # 在累积概率空间等分，反推价格
+        cdf_range = cdf_upper - cdf_lower
+        for i in range(grid_num):
+            p = cdf_lower + cdf_range * i / (grid_num - 1) if grid_num > 1 else cdf_lower
+            # 限制 p 在有效范围内
+            p = max(0.001, min(0.999, p))
+            price = mid_price + gamma * math.tan(math.pi * (p - 0.5))
+            # 确保价格在区间内
+            price = max(lower_f, min(upper_f, price))
+            prices.append(Decimal(str(round(price, 2))))
+
+        return prices
 
     def get_target_sell_price(self, grid: GridInstance, buy_level_id: int) -> Optional[Decimal]:
         """获取买入单对应的目标卖出价格"""

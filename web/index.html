@@ -261,6 +261,22 @@
             background: #ff444411;
             border-radius: 4px;
         }
+
+        .grid-type-info {
+            background: #00d4aa22;
+            border: 1px solid #00d4aa44;
+            border-radius: 6px;
+            padding: 12px;
+            margin-top: 10px;
+            font-size: 13px;
+            color: #00ff88;
+        }
+
+        .grid-type-info.cauchy {
+            background: #ffa50022;
+            border-color: #ffa50044;
+            color: #ffa500;
+        }
     </style>
 </head>
 <body>
@@ -368,13 +384,26 @@
                 </div>
                 <div class="form-row">
                     <div class="form-group">
+                        <label>网格类型</label>
+                        <select id="gridType" required onchange="updateGridTypeDesc()">
+                            <option value="uniform">等间距网格（传统）</option>
+                            <option value="cauchy">柯西分布网格（推荐）</option>
+                        </select>
+                        <div id="gridTypeDesc" class="grid-type-info">
+                            📘 <strong>等间距网格</strong>：所有网格间距相等，适合价格稳定波动的市场。
+                        </div>
+                    </div>
+                    <div class="form-group">
                         <label>止损价 (可选)</label>
                         <input type="number" id="stopLoss" step="0.01">
                     </div>
+                </div>
+                <div class="form-row">
                     <div class="form-group">
                         <label>止盈价 (可选)</label>
                         <input type="number" id="takeProfit" step="0.01">
                     </div>
+                    <div class="form-group"></div>
                 </div>
                 <div class="form-group">
                     <label>网格价格预览</label>
@@ -519,6 +548,19 @@
         function showCreateModal() {
             document.getElementById('createModal').classList.add('show');
             updatePricePreview();
+            updateGridTypeDesc();
+        }
+
+        function updateGridTypeDesc() {
+            const gridType = document.getElementById('gridType').value;
+            const descEl = document.getElementById('gridTypeDesc');
+            if (gridType === 'cauchy') {
+                descEl.className = 'grid-type-info cauchy';
+                descEl.innerHTML = '📊 <strong>柯西分布网格</strong>：在当前价格附近网格更密集，利用柯西分布的重尾特性，在价格密集区布置更多网格，提高资金利用率，特别适合震荡行情。';
+            } else {
+                descEl.className = 'grid-type-info';
+                descEl.innerHTML = '📘 <strong>等间距网格</strong>：所有网格间距相等，适合价格稳定波动的市场。';
+            }
         }
 
         function closeCreateModal() {
@@ -529,6 +571,7 @@
             const lower = parseFloat(document.getElementById('lowerPrice').value) || 0;
             const upper = parseFloat(document.getElementById('upperPrice').value) || 0;
             const num = parseInt(document.getElementById('gridNum').value) || 10;
+            const gridType = document.getElementById('gridType').value || 'uniform';
 
             if (lower <= 0 || upper <= 0 || lower >= upper || num <= 0) {
                 document.getElementById('pricePreview').innerHTML = '<div style="color: #666;">请输入有效参数</div>';
@@ -536,51 +579,78 @@
             }
 
             try {
+                const instId = document.getElementById('instId').value;
                 const res = await fetch('/api/grids/preview', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ lower_price: lower, upper_price: upper, grid_num: num })
+                    body: JSON.stringify({
+                        inst_id: instId,
+                        lower_price: lower,
+                        upper_price: upper,
+                        grid_num: num,
+                        grid_type: gridType
+                    })
                 });
                 const data = await res.json();
                 const container = document.getElementById('pricePreview');
 
                 if (data.levels && data.levels.length > 0) {
                     // 获取当前价格（从 tickers 或默认值）
-                    const instId = document.getElementById('instId').value;
                     const currentPrice = window.currentPrices?.[instId] || 0;
 
-                    container.innerHTML = data.levels.map(l => {
+                    // 计算网格间距统计（仅用于显示）
+                    const prices = data.levels.map(l => l.price);
+                    const gaps = [];
+                    for (let i = 1; i < prices.length; i++) {
+                        gaps.push(((prices[i] - prices[i-1]) / prices[i-1] * 100).toFixed(3));
+                    }
+                    const avgGap = gaps.length > 0 ? (gaps.reduce((a, b) => parseFloat(a) + parseFloat(b), 0) / gaps.length).toFixed(3) : 0;
+                    const minGap = gaps.length > 0 ? Math.min(...gaps.map(g => parseFloat(g))).toFixed(3) : 0;
+                    const maxGap = gaps.length > 0 ? Math.max(...gaps.map(g => parseFloat(g))).toFixed(3) : 0;
+
+                    container.innerHTML = data.levels.map((l, idx) => {
                         // 根据当前价格判断实际挂单类型
                         let displayType = l.type;
                         let displayText = '🟢 买入';
+                        let icon = '🟢';
                         if (currentPrice > 0) {
                             if (l.price >= currentPrice) {
                                 displayType = 'wait';  // 等待挂单
                                 displayText = '⏸️ 等待';
+                                icon = '⏸️';
                             } else {
                                 displayType = 'buy';
                                 displayText = '🟢 买入';
+                                icon = '🟢';
                             }
                         }
+                        // 柯西网格显示间距
+                        let gapInfo = '';
+                        if (idx > 0 && gaps[idx - 1]) {
+                            gapInfo = `<span style="color:#666;font-size:11px;">(+${gaps[idx-1]}%)</span>`;
+                        }
                         return `
-                            <div class="price-item ${displayType}">
-                                <span>格 ${l.level}</span>
-                                <span>${displayText}</span>
-                                <span>$${l.price.toFixed(2)}</span>
+                            <div class="price-item ${displayType}" style="flex-wrap:wrap;">
+                                <span style="min-width:60px;">格 ${l.level}</span>
+                                <span style="min-width:50px;">${icon}</span>
+                                <span style="flex:1;">$${l.price.toFixed(2)}</span>
+                                ${gapInfo}
                             </div>
                         `;
                     }).join('');
 
-                    // 添加说明
-                    if (currentPrice > 0) {
-                        container.innerHTML += `
-                            <div style="margin-top:10px;padding:8px;background:#1f3460;border-radius:4px;font-size:12px;color:#888;">
-                                💡 当前价格：$${currentPrice} |
-                                启动时：在当前价下方挂买单 |
-                                买单成交后：在上一格挂卖单
-                            </div>
-                        `;
-                    }
+                    // 添加说明和统计
+                    let gridTypeDesc = gridType === 'cauchy' ? '柯西分布' : '等间距';
+                    let gridTypeFeature = gridType === 'cauchy'
+                        ? '✨ 在当前价附近网格更密集，更适合震荡行情'
+                        : '📏 所有网格间距相等，适合稳定波动';
+                    container.innerHTML += `
+                        <div style="margin-top:10px;padding:8px;background:#1f3460;border-radius:4px;font-size:12px;color:#888;">
+                            💡 网格类型：${gridTypeDesc} | 平均间距：${avgGap}% | 最小：${minGap}% | 最大：${maxGap}%<br>
+                            ${gridTypeFeature}<br>
+                            ${currentPrice > 0 ? `当前价格：$${currentPrice} | 启动时：在当前价下方挂买单 | 买单成交后：在上一格挂卖单` : ''}
+                        </div>
+                    `;
                 }
             } catch (e) {
                 console.error('预览失败:', e);
@@ -671,6 +741,7 @@
                 upper_price: parseFloat(document.getElementById('upperPrice').value),
                 grid_num: parseInt(document.getElementById('gridNum').value),
                 investment_amount: parseFloat(document.getElementById('investment').value),
+                grid_type: document.getElementById('gridType').value || 'uniform',
                 stop_loss_price: parseFloat(document.getElementById('stopLoss').value) || null,
                 take_profit_price: parseFloat(document.getElementById('takeProfit').value) || null
             };
